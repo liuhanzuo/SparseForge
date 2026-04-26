@@ -1,0 +1,3 @@
+# Replace with your node IPs and GPU slots.
+<MASTER_IP> slots=8
+<WORKER_IP> slots=8

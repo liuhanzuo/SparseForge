@@ -1,0 +1,66 @@
+# ---------- Byte-compiled / cache ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- Distribution / packaging ----------
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---------- Virtual environments ----------
+.env
+.venv
+env/
+venv/
+ENV/
+
+# ---------- Editor / IDE ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+
+# ---------- PyTorch / ML artifacts ----------
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# ---------- Training run outputs ----------
+out/
+out_*/
+outputs/
+runs/
+wandb/
+logs/
+checkpoints/
+
+# ---------- Core dumps / tracebacks ----------
+core.*
+*.restore
+
+# ---------- Data & pretrained weights ----------
+# Do NOT commit raw datasets or HuggingFace caches.
+data/c4_*/
+data/wikitext/
+data/hf_datasets/
+models/
+gpt2/
+
+# ---------- Secrets ----------
+.hf_token
+*.pem
+*.key
+
+# ---------- OS ----------
+Thumbs.db
