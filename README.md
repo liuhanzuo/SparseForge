@@ -1,20 +1,26 @@
 # SparseForge
 
-> **Official code release for the paper _"&lt;PAPER TITLE&gt;"_.**
-> Paper: `<ARXIV_LINK>` &nbsp;|&nbsp; Venue: `<VENUE>`
+> **Official code for _"SparseForge: Efficient LLM Semi-Structured Pruning via Hessian-Guided Soft-Mask Tempering"_**
+> Paper: [arXiv (coming soon)]() &nbsp;|&nbsp; Venue: NeurIPS 2026 (under review)
 
-**SparseForge** is a unified training framework for compressing modern Large Language
-Models with **semi-structured sparsity** — including **N:M** (2:4) and **block-sparse-16**
-patterns — while preserving accuracy close to the dense baseline. It builds on our prior
-work [*Adaptive Sparse Trainer*](https://arxiv.org/abs/2407.20584) (AAAI 2025) and extends
-it with:
+**SparseForge** is a post-training framework for semi-structured LLM sparsification that
+optimizes the sparsity mask directly — rather than scaling up retraining tokens — to
+achieve efficient sparse recovery. It combines **Hessian-aware importance estimation**
+with **progressive tempering** of soft masks into hardware-executable 2:4 patterns.
 
-- A **unified** training entry point that supports **LLaMA / OPT / GPT-2 / Qwen / Mistral / DeepSeek-MoE / Hunyuan**.
-- **Block-sparse-16** kernels (forward/backward) built on Triton, in addition to the classic 2:4 N:M pattern.
-- A **continuous mask** training objective with **Hutchinson Hessian** importance estimation, soft-top-k mask updates, temperature annealing and a scheduled *hardening* phase.
-- **SLoRB** (Sparse Low-Rank Bypass) correction modules, Square-head / KL-div / task-loss distillation, and optional FSDP + DeepSpeed sharding for 7B-scale training.
+**Key result:** On LLaMA-2-7B under 2:4 sparsity, SparseForge reaches **57.27%** average
+zero-shot accuracy with only **5B** retraining tokens — surpassing the dense model
+(56.43%) and approaching a 40B-token prior SOTA (57.52%) with ~8× fewer tokens.
 
-![Pipeline](assets/Pipeline.png)
+### Highlights
+
+- **Soft-mask optimization** — treats the sparsity mask as a continuous, optimizable variable; avoids premature hard decisions that plague one-shot pruning.
+- **Hessian-guided scoring** — uses stochastic Hutchinson estimation to capture deletion sensitivity under grouped (2:4) competition.
+- **Progressive tempering** — gradually shapes soft masks into deployable binary patterns, closing the soft-to-hard gap without abrupt accuracy drops.
+- **SLoRB** (Sparse Low-Rank Bypass) — lightweight correction modules for residual capacity.
+- **Multi-architecture** — supports LLaMA / OPT / GPT-2 / Qwen / Mistral / DeepSeek-MoE / Hunyuan.
+- **Block-sparse-16** Triton kernels in addition to the classic 2:4 N:M pattern.
+- Optional **FSDP + DeepSpeed** sharding for 7B+ scale training.
 
 ---
 
@@ -22,41 +28,42 @@ it with:
 
 ```
 SparseForge/
-├── main_llama.py            # Paper entry point: LLaMA-2-7B training
-├── main_universal.py        # Paper entry point: universal multi-model training
-├── train_llama.sh           # Launcher for main_llama.py (DeepSpeed / torchrun / FSDP)
-├── train_universal.sh       # Launcher for main_universal.py
+├── sparseforge/             # Modular Python package (clean API)
+│   ├── __init__.py
+│   ├── cli.py              # Argparse builders
+│   ├── data_pipeline.py    # AsyncDataPrefetcher / get_batch
+│   ├── distributed.py      # Multi-node barrier / debug logging
+│   ├── optim_utils.py      # Optimizer construction, LR schedule
+│   ├── eval_utils.py       # estimate_loss
+│   ├── state.py            # TrainState dataclass
+│   ├── checkpoint.py       # Resume / save logic
+│   ├── training_loop.py    # Main training loop interface
+│   └── model_builders/     # Per-architecture model builders
+│       ├── llama.py
+│       └── universal.py
 │
-├── sparse_modeling.py       # Core: SparseLinear / SparseLinearConfig / Distill_Model
-├── triton_block_sparse.py   # Triton kernels for block-sparse-16
-├── adamw.py                 # AdamW with decoupled weight decay for masked params
+├── legacy/                  # Monolithic single-file entry points (see below)
+│   ├── main_llama.py       # LLaMA-2-7B training (all-in-one)
+│   ├── main_universal.py   # Multi-architecture training (all-in-one)
+│   ├── eval_wiki_ppl.py    # Standalone evaluation script
+│   ├── sparse_modeling.py  # SparseLinear / Distill_Model
+│   ├── utils.py            # Mask ops, Hessian, penalties, calibration
+│   ├── model_factory.py    # Auto-dispatch model creation
+│   ├── model_*.py          # Per-architecture model adapters
+│   ├── adamw.py            # Mask-aware AdamW optimizer
+│   └── triton_block_sparse.py  # Triton block-sparse kernels
 │
-├── model.py                 # Base sparse model wrapper
-├── model_factory.py         # Auto-dispatch to the correct model adapter
-├── model_llama.py           # LLaMA adapter
-├── model_qwen.py            # Qwen adapter
-├── model_mistral.py         # Mistral adapter
-├── model_opt.py             # OPT adapter
-├── model_hunyuan.py         # Hunyuan adapter
-├── model_deepseek_moe.py    # DeepSeek-MoE adapter
-│
-├── utils.py                 # Mask computation, Hessian, penalties, data pipeline
-├── channel_pruning/         # Structured channel-pruning utilities (used by main_universal)
-│
-├── eval_wiki_ppl.py/.sh     # WikiText-2 PPL + lm_eval benchmarks
-├── evaluate_benchmarks.py   # Zero-shot benchmark runner
-├── check_sparsity.py        # Inspect mask sparsity of a checkpoint
-│
-├── prepare_calibration_data.py
-├── prepare_synthetic_calibration.py
-├── download_hf_model.py     # HuggingFace model downloader
-├── download_wikitext.py     # WikiText-2 downloader
-├── download_c4.sh           # C4 downloader
-│
-├── data/                    # Dataset prep scripts (PIQA, instruct tuning, etc.)
+├── channel_pruning/         # Structured channel-pruning utilities
+├── data/                    # Dataset download & preparation scripts
 ├── configs/                 # DeepSpeed config + hostfile template
 ├── scripts/                 # Cluster launcher + data preparation helpers
-└── assets/                  # Figures
+├── assets/                  # Figures
+│
+├── train_llama.sh           # Launcher → legacy/main_llama.py
+├── train_universal.sh       # Launcher → legacy/main_universal.py
+├── eval_wiki_ppl.sh         # Launcher → legacy/eval_wiki_ppl.py
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -64,7 +71,7 @@ SparseForge/
 ## Installation
 
 ```bash
-git clone https://github.com/<org-or-user>/SparseForge.git
+git clone https://github.com/<YOUR_ORG>/SparseForge.git
 cd SparseForge
 
 # 1. PyTorch (adjust the CUDA version to your system)
@@ -78,14 +85,35 @@ Tested with PyTorch 2.1+, CUDA 12.1, and 8×H800 / 8×A100 GPUs.
 
 ---
 
+## Alternative: Legacy Monolithic Scripts
+
+The `legacy/` directory contains the **original all-in-one training scripts** that were
+used to produce all paper results. Each script embeds the full training loop, model
+construction, mask scheduling, and evaluation inline — no external package dependencies
+beyond PyTorch and HuggingFace.
+
+This is the **battle-tested, numerically verified** code path. If you just want to
+reproduce the paper numbers without touching the modular `sparseforge/` package, use
+the shell launchers directly — they already point to `legacy/`:
+
+```bash
+bash train_llama.sh 1 0          # single-node LLaMA training
+bash train_universal.sh 1 0      # single-node universal training
+bash eval_wiki_ppl.sh 1 0        # single-node evaluation
+```
+
+See [`legacy/README.md`](legacy/README.md) for details.
+
+---
+
 ## Data Preparation
 
 ### C4 (training corpus)
 
 ```bash
-bash download_c4.sh                 # raw shards
+bash data/download_c4.sh                 # raw shards
 # Per-tokenizer pre-tokenisation (one of the following, depending on the model):
-python data/prepare_instruct.py     # instruction-style preprocessing
+python data/prepare_instruct.py          # instruction-style preprocessing
 # or see scripts/prepare_mixed_c4_based.py for per-tokenizer binarization
 ```
 
@@ -95,18 +123,34 @@ Each tokenizer produces an isolated binary directory (e.g. `data/c4_llama/`,
 ### WikiText-2 (evaluation)
 
 ```bash
-python download_wikitext.py
+python data/download_wikitext.py
 ```
 
 ### Pre-trained models
 
 ```bash
-python download_hf_model.py --repo NousResearch/Llama-2-7b-hf --out models/Llama--Llama2-7b
+python data/download_hf_model.py --repo NousResearch/Llama-2-7b-hf --out models/Llama--Llama2-7b
 ```
 
 ---
 
 ## Training
+
+### Launch Scripts Overview
+
+| Script | Depends on `cluster_launcher.sh` | Mode | Description |
+| --- | --- | --- | --- |
+| `train_llama.sh` | Yes | Multi-node (Controller) or single-node | LLaMA-2-7B sparse training |
+| `train_universal.sh` | Yes | Multi-node (Controller) or single-node | Universal multi-model sparse training |
+| `eval_wiki_ppl.sh` | Yes | Remote node evaluation | WikiText-2 PPL + lm_eval benchmarks |
+| `scripts/train_channel_pruning.sh` | No | Single-node DDP only | Structured channel pruning |
+| `scripts/cluster_launcher.sh` | — | Library (sourced) | Node pool management, SSH orchestration |
+
+**Controller mode** (recommended): `bash train_llama.sh <NNODES> <IDX1> ... <IDXN>` — selects
+nodes from the pool defined in `cluster_launcher.sh` and auto-launches via SSH.
+
+**Legacy mode**: `bash train_llama.sh <MASTER_IP> <NODE_RANK> <NNODES>` — run manually on
+each node.
 
 ### LLaMA-2-7B (block-sparse-16, Hutchinson Hessian)
 
@@ -155,7 +199,7 @@ bash train_universal.sh
 | `--distill_model`, `--hardness_task/kldiv/squarehead` | Distillation loss weights |
 | `--use_fsdp`, `--fsdp_mode` | `hybrid_shard` / `full_shard` / `none` |
 
-See `main_universal.py --help` for the full list.
+See `legacy/main_universal.py --help` for the full list.
 
 ---
 
@@ -168,7 +212,7 @@ MODEL_PATH=models/Qwen--Qwen3-1.7b \
 bash eval_wiki_ppl.sh
 
 # Inspect checkpoint sparsity
-python check_sparsity.py --ckpt outputs/.../model.pt
+python legacy/check_sparsity.py --ckpt outputs/.../model.pt
 ```
 
 `eval_wiki_ppl.sh` will optionally run `lm_eval` on `boolq, rte, hellaswag, winogrande,
@@ -180,34 +224,54 @@ arc_easy, arc_challenge, openbookqa` with `RUN_LM_EVAL=true`.
 
 | Table | Entry point | Config |
 | --- | --- | --- |
-| LLaMA-2-7B 2:4 / block16 | `main_llama.py` via `train_llama.sh` | Defaults in `train_llama.sh` |
-| Qwen / Mistral / OPT / DeepSeek-MoE | `main_universal.py` via `train_universal.sh` | Uncomment the relevant `STUDENT_MODEL` block |
+| LLaMA-2-7B 2:4 / block16 | `legacy/main_llama.py` via `train_llama.sh` | Defaults in `train_llama.sh` |
+| Qwen / Mistral / OPT / DeepSeek-MoE | `legacy/main_universal.py` via `train_universal.sh` | Uncomment the relevant `STUDENT_MODEL` block |
 | Zero-shot benchmarks | `eval_wiki_ppl.sh` with `RUN_LM_EVAL=true` | — |
 
 Default hyper-parameters in the provided `.sh` scripts match the paper setup.
 
 ---
 
+## Results at a Glance
+
+### Cross-Model Summary (2:4 sparsity, mean zero-shot accuracy %)
+
+| Model | Dense | SparseForge | Δ |
+| --- | --- | --- | --- |
+| GPT2-Medium | 40.97 | 40.31 | -0.66 |
+| GPT2-Large | 42.76 | 42.10 | -0.66 |
+| GPT2-XL | 45.49 | 44.34 | -1.15 |
+| OPT-2.7B | 47.76 | 46.67 | -1.09 |
+| Qwen3-1.7B | 56.51 | 53.33 | -3.18 |
+| Qwen3-8B | 65.73 | 63.31 | -2.42 |
+| Qwen3-14B | 68.36 | 65.44 | -2.93 |
+| DeepSeek-MoE-16B | 59.54 | 58.57 | -0.97 |
+
+### LLaMA-2-7B Comparison (2:4 sparsity)
+
+| Method | Tokens | Mean Acc. | Wiki PPL |
+| --- | --- | --- | --- |
+| Dense | 2T | 56.43% | 5.12 |
+| Wanda | 0 | 45.98% | 11.29 |
+| SparseGPT | 0 | 47.16% | 10.42 |
+| MaskLLM | 2B | 52.09% | 6.72 |
+| CAST | 7.5B | 55.91% | 5.58 |
+| **SparseForge** | **1.25B** | **55.96%** | 6.24 |
+| **SparseForge** | **5B** | **57.27%** | 6.09 |
+| CAST† (40B tokens) | 40B | 57.52% | 5.21 |
+
+---
+
 ## Citation
 
-If you find SparseForge useful in your research, please cite both the current paper and
-the prior Adaptive Sparse Trainer work:
+If you find SparseForge useful, please cite:
 
 ```bibtex
-@article{sparseforge2026,
-  title   = {<PAPER TITLE>},
-  author  = {<AUTHORS>},
-  journal = {<VENUE>},
-  year    = {<YEAR>},
-  url     = {<ARXIV_LINK>}
-}
-
-@inproceedings{ast2025,
-  title     = {Pruning Large Language Models with Semi-Structural Adaptive Sparse Training},
-  author    = {<AUTHORS>},
-  booktitle = {AAAI},
-  year      = {2025},
-  url       = {https://arxiv.org/abs/2407.20584}
+@article{liu2026sparseforge,
+  title   = {SparseForge: Efficient LLM Semi-Structured Pruning via Hessian-Guided Soft-Mask Tempering},
+  author  = {Liu, Hanzuo and Lin, Chaofan and Sun, Weixuan and Wang, Yulong and Rayying and Key and Gao, Mingyu},
+  journal = {arXiv preprint},
+  year    = {2026}
 }
 ```
 

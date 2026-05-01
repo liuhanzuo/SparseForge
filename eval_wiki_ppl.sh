@@ -2,31 +2,32 @@
 ###############################################################################
 # eval_wiki_ppl.sh
 #
-# 独立的评估脚本，用于评估 checkpoint 的 WikiText-2 PPL + lm_eval benchmarks。
-# 支持在任意集群节点上运行（单节点 8 卡）。
+# Standalone evaluation script for WikiText-2 perplexity + lm_eval benchmarks.
+# Supports running on any cluster node (single-node, 8 GPUs) via
+# cluster_launcher.sh remote node selection.
 #
 # Usage:
-#   # 在当前节点运行（默认）
+#   # Run on the current node (default)
 #   bash eval_wiki_ppl.sh
 #
-#   # 指定在节点 3 上运行（使用 cluster_launcher 的节点选择）
+#   # Run on node 3 (using cluster_launcher node selection)
 #   bash eval_wiki_ppl.sh 1 3
 #
-#   # 指定在节点 1 上运行
+#   # Run on node 1
 #   bash eval_wiki_ppl.sh 1 1
 #
-#   # 通过环境变量覆盖参数
+#   # Override parameters via environment variables
 #   CKPT_PATH=outputs/.../model.pt MODEL_PATH=models/xxx BLOCK_SIZE=2048 bash eval_wiki_ppl.sh 1 2
 #
-#   # 追加额外参数（-- 之后的内容会传给 eval_wiki_ppl.py）
+#   # Append extra arguments (everything after -- is forwarded to eval_wiki_ppl.py)
 #   bash eval_wiki_ppl.sh 1 3 -- --ckpt_path2 retrain_best.pt --output_json results.json
 #
-# 节点列表（与 train_channel_universal.sh 共享，定义在 cluster_launcher.sh 中）：
+# Node pool (shared with training scripts, defined in cluster_launcher.sh):
 #   1: <NODE_IP_1>
 #   2: <NODE_IP_2>
 #   3: <NODE_IP_3>
 #   4: <NODE_IP_4>
-# 也可通过 CLUSTER_NODE_IPS 环境变量覆盖。
+# Override via CLUSTER_NODE_IPS environment variable.
 ###############################################################################
 
 set -euo pipefail
@@ -62,7 +63,7 @@ if [[ "${INTERNAL_LAUNCH:-0}" != "1" ]]; then
       idxs+=("$1")
       shift
     done
-    # eval 只需要单节点，强制 NNODES=1 避免多节点分布式启动
+    # Eval only needs a single node; force NNODES=1 to avoid multi-node distributed launch.
     if [[ "$nnodes" -gt 1 ]]; then
       echo "[WARN] eval_wiki_ppl only needs 1 node, using first selected node (idx=${idxs[0]})"
       nnodes=1
@@ -74,12 +75,12 @@ if [[ "${INTERNAL_LAUNCH:-0}" != "1" ]]; then
 fi
 
 # =============================================================================
-# Proxy Settings
+# Proxy Settings (optional) — uncomment and modify if needed for model downloads.
 # =============================================================================
-export http_proxy=http://your-proxy:port
-export https_proxy=http://your-proxy:port
-export all_proxy=http://your-proxy:port
-export no_proxy=localhost,127.0.0.1,.local
+# export http_proxy=http://your-proxy-host:port
+# export https_proxy=http://your-proxy-host:port
+# export all_proxy=http://your-proxy-host:port
+# export no_proxy=localhost,127.0.0.1,.local
 
 # =============================================================================
 # Evaluation Parameters (override via environment variables)
@@ -164,4 +165,4 @@ echo "[CONFIG] Node: $(hostname) ($(hostname -I | awk '{print $1}'))"
 echo "=============================================================="
 echo ""
 
-"${launch_cmd[@]}" eval_wiki_ppl.py "${args[@]}"
+"${launch_cmd[@]}" legacy/eval_wiki_ppl.py "${args[@]}"

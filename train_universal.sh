@@ -1,4 +1,47 @@
 #!/usr/bin/env bash
+###############################################################################
+# train_universal.sh — Universal Sparse Trainer (OPT / LLaMA / GPT-2 / Qwen)
+###############################################################################
+# This script launches sparse training for various model architectures using
+# SparseForge. It relies on `scripts/cluster_launcher.sh` for multi-node
+# orchestration.
+#
+# ─── Launch Modes ───────────────────────────────────────────────────────────
+#
+# 1) Controller mode (recommended for multi-node):
+#    Automatically selects nodes from the pool and launches via SSH.
+#      bash train_universal.sh <NNODES> <IDX1> ... <IDXN> [-- extra args]
+#    Examples:
+#      bash train_universal.sh 2 1 3       # 2 nodes: pool indices 1 and 3
+#      bash train_universal.sh 1 2         # single node: pool index 2
+#      bash train_universal.sh 2 1 3 -- --model_type llama
+#
+# 2) Legacy manual mode (run on each node separately):
+#      bash train_universal.sh <MASTER_IP> <NODE_RANK> <NNODES>
+#    Example (on node 0):
+#      bash train_universal.sh 10.0.0.1 0 2
+#
+# 3) Single-node (no arguments):
+#      bash train_universal.sh
+#
+# ─── Key Environment Variables ──────────────────────────────────────────────
+#
+#   NNODES              Number of nodes (default: 1)
+#   NPROC_PER_NODE      GPUs per node (default: 8)
+#   MASTER_ADDR         Master node IP (auto-detected in controller mode)
+#   MASTER_PORT         Master port (default: 29500)
+#   LAUNCH_MODE         "single" (DeepSpeed SSH) or "multi" (torchrun per node)
+#   USE_FSDP_FULLY_SHARDED  Set to 1 to use PyTorch FSDP fully-sharded mode
+#   WORKDIR             Shared filesystem path (default: script directory)
+#   CLUSTER_NODE_IPS    Override node pool IPs (space-separated)
+#
+# ─── Prerequisites ──────────────────────────────────────────────────────────
+#
+#   - Passwordless SSH between all nodes (for controller mode)
+#   - Shared filesystem accessible from all nodes at the same path
+#   - CUDA-capable GPUs with PyTorch + DeepSpeed/FSDP installed
+#
+###############################################################################
 set -euo pipefail
 export CLUSTER_ENV_SETUP='source ~/.bashrc && conda activate minillm &&'
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -18,7 +61,7 @@ if [[ -z "${AST_TRACE_DIR:-}" ]]; then
 fi
 mkdir -p "${AST_TRACE_DIR}" >/dev/null 2>&1 || true
 
-# HuggingFace 缓存目录配置（使用共享存储）
+# HuggingFace cache directories (using shared storage)
 export HF_HOME=${HF_HOME:-"${WORKDIR}/models"}
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-"${WORKDIR}/models"}
 export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-"${WORKDIR}/data/hf_datasets"}
@@ -46,7 +89,8 @@ fi
 
 echo "Training launched (Universal Sparse Trainer - OPT/LLaMA/GPT-2)."
 
-# 默认 master 地址（rank0）和备节点地址（rank1），仅在多机模式下使用
+# Default master (rank0) and worker (rank1) addresses — only used in multi-node mode.
+# >>> Replace with your actual node IPs <<<
 DEFAULT_MASTER_ADDR=<MASTER_IP>
 DEFAULT_WORKER_ADDR=<WORKER_IP>
 # export NCCL_DEBUG=INFO
@@ -62,7 +106,7 @@ export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-bond1}
 # with CUDA context initialization in multi-node environments.
 export NCCL_NVLS_ENABLE=0
 
-# 多节点环境下跳过配置一致性检查（all_gather_object 在大规模环境下可能不稳定）
+# Skip config consistency check in multi-node (all_gather_object can be unstable at scale)
 export AST_SKIP_CONFIG_CHECK=${AST_SKIP_CONFIG_CHECK:-1}
 
 echo "[trace] RUN_ID=${RUN_ID}"
@@ -84,7 +128,7 @@ fi
 # - multi: run on EACH node; specify NODE_RANK explicitly; DeepSpeed will NOT ssh.
 LAUNCH_MODE=${LAUNCH_MODE:-single}
 
-# 启动参数： ./train_universal.sh [MASTER_ADDR] [NODE_RANK] [NNODES]
+# Legacy positional args: ./train_universal.sh [MASTER_ADDR] [NODE_RANK] [NNODES]
 MASTER_ADDR_ARG=${1:-}
 NODE_RANK_ARG=${2:-}
 NNODES_ARG=${3:-}
@@ -119,8 +163,8 @@ else
   export MASTER_ADDR=${MASTER_ADDR_ARG:-${MASTER_ADDR:-$DEFAULT_MASTER_ADDR}}
   if [ "${LAUNCH_MODE}" = "single" ]; then
     if [ "${NODE_RANK}" -ne 0 ]; then
-      echo "[LAUNCH_MODE=single] 请只在 master 节点运行本脚本 (NODE_RANK=0)。"
-      echo "  当前 NODE_RANK=${NODE_RANK}，将直接退出以避免重复/冲突拉起。"
+echo "[LAUNCH_MODE=single] This script should only run on the master node (NODE_RANK=0)."
+      echo "  Current NODE_RANK=${NODE_RANK}; exiting to avoid duplicate launches."
       exit 0
     fi
     if [ ! -f "${DEEPSPEED_HOSTFILE}" ]; then
@@ -157,10 +201,12 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 # STUDENT_MODEL="models/facebook--opt-2.7b"
 # TEACHER_MODEL="models/facebook--opt-2.7b"
 # MODEL_TYPE="opt"
-export http_proxy=http://your-proxy:port
-export https_proxy=http://your-proxy:port
-export all_proxy=http://your-proxy:port
-export no_proxy=localhost,127.0.0.1,.local
+
+# Network proxy (optional) — uncomment and modify if needed for model downloads.
+# export http_proxy=http://your-proxy-host:port
+# export https_proxy=http://your-proxy-host:port
+# export all_proxy=http://your-proxy-host:port
+# export no_proxy=localhost,127.0.0.1,.local
  
 # Option 2: LLaMA-2-7B (uncomment to use)
 # STUDENT_MODEL="models/Llama--Llama2-7b"
@@ -296,4 +342,4 @@ fi
   launcher_name="${launch_cmd[0]}"
   echo "Launching with ${launcher_name}"
   echo "Model: ${STUDENT_MODEL} (type: ${MODEL_TYPE})"
-  "${launch_cmd[@]}" main_universal.py "${args[@]}"
+"${launch_cmd[@]}" legacy/main_universal.py "${args[@]}"

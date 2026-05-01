@@ -1,3 +1,32 @@
+"""SparseForge core utilities for mask management, Hessian estimation, and evaluation.
+
+This module contains the core algorithmic building blocks used by the training
+scripts (``main_llama.py``, ``main_universal.py``).  Functions are organized
+into the following sections:
+
+Sections
+--------
+1. MODEL UTILITIES
+   - get_raw_model, set_model_mode, sync_weight, initialize_model
+
+2. GRADIENT EMA & HESSIAN ESTIMATION
+   - update_model_grad_ema, update_hessian_hutchinson
+
+3. MASK MANAGEMENT & UPDATES
+   - update_mask_penalty_lr, calculate_model_mask, calculate_flip_rate
+
+4. SPARSITY PENALTIES & HARDENING
+   - mid_penalty, sparsity_penalty, nm_2_4_tile_stats, harden_fraction
+
+5. EVALUATION (WikiText-2 PPL)
+   - eval_ppl, eval_ppl_distributed
+
+6. CALIBRATION DATA
+   - find_layers, prepare_calibration_input, add_calibration
+
+7. MASK STATISTICS & LOGGING
+   - mask_stats, log_mask_stats
+"""
 # utils.py
 import os
 import pickle
@@ -21,6 +50,10 @@ except Exception:
 
 from sparse_modeling import SparseLinear
 
+
+# =============================================================================
+# SECTION 1: MODEL UTILITIES
+# =============================================================================
 
 @torch.no_grad()
 def get_raw_model(model):
@@ -83,9 +116,9 @@ def initialize_model(model):
                 module.init_SLoRB()
 
 
-# -----------------------------
-# EMA updates (called every step)
-# -----------------------------
+# =============================================================================
+# SECTION 2: GRADIENT EMA & HESSIAN ESTIMATION
+# =============================================================================
 @torch.no_grad()
 def update_model_grad_ema(model, update_hessian_with_grad2: bool = True):
     """
@@ -100,6 +133,10 @@ def update_model_grad_ema(model, update_hessian_with_grad2: bool = True):
             module.update_grad_hessian_ema(update_hessian_with_grad2=update_hessian_with_grad2)
             # update_importance_ema() removed - scores computed directly from grad_ema/hessian_diag
 
+
+# =============================================================================
+# SECTION 3: MASK MANAGEMENT & UPDATES
+# =============================================================================
 
 @torch.no_grad()
 def update_mask_penalty_lr(model, step: int, max_steps: int, 
@@ -832,9 +869,9 @@ def update_hessian_hutchinson(model, loss):
 
 
 
-# -----------------------------
-# (Optional) mid penalty / hardening
-# -----------------------------
+# =============================================================================
+# SECTION 4: SPARSITY PENALTIES & HARDENING
+# =============================================================================
 @torch.no_grad()
 def mid_penalty(model, lambda_mid: float = 0.0):
     """
@@ -1239,9 +1276,10 @@ def harden_fraction(model, fraction: float = 0.2, band_low: float = 0.4, band_hi
     return hardened
 
 
-# -----------------------------
-# Evaluation / Calibration (WANDA)
-# -----------------------------
+# =============================================================================
+# SECTION 5: EVALUATION (WikiText-2 PPL)
+# =============================================================================
+
 @torch.no_grad()
 def eval_ppl(model, bs=2, device="cuda:0", block_size=1024, model_name_or_path=None):
     """
@@ -1904,6 +1942,10 @@ def eval_ppl_distributed(model, bs=2, device="cuda:0", block_size=1024, model_na
     return float(ppl_tensor.item())
 
 
+# =============================================================================
+# SECTION 6: CALIBRATION DATA
+# =============================================================================
+
 def find_layers(module, layers=[nn.Linear], name=""):
     if type(module) in layers:
         return {name: module}
@@ -2018,6 +2060,12 @@ def add_calibration(model, nsamples=128, device="cuda",
         inps, outs = outs, inps
 
     torch.cuda.empty_cache()
+
+
+# =============================================================================
+# SECTION 7: MASK STATISTICS & LOGGING
+# =============================================================================
+
 @torch.no_grad()
 def mask_stats(model, bins: int = 100, eps: float = 1e-8,
                sample_per_layer: int = 4096):

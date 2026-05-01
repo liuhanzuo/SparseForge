@@ -1,9 +1,53 @@
 #!/usr/bin/env bash
+###############################################################################
+# train_llama.sh — LLaMA-2-7B Semi-Structured Sparse Training
+###############################################################################
+# This script launches sparse training for LLaMA-2-7B using SparseForge.
+# It relies on `scripts/cluster_launcher.sh` for multi-node orchestration.
+#
+# ─── Launch Modes ───────────────────────────────────────────────────────────
+#
+# 1) Controller mode (recommended for multi-node):
+#    Automatically selects nodes from the pool and launches via SSH.
+#      bash train_llama.sh <NNODES> <IDX1> ... <IDXN> [-- extra args]
+#    Examples:
+#      bash train_llama.sh 2 1 3          # 2 nodes: pool indices 1 and 3
+#      bash train_llama.sh 1 2            # single node: pool index 2
+#      bash train_llama.sh 2 1 3 -- --sparsity_ratio 0.6
+#
+# 2) Legacy manual mode (run on each node separately):
+#      bash train_llama.sh <MASTER_IP> <NODE_RANK> <NNODES>
+#    Example (on node 0):
+#      bash train_llama.sh 10.0.0.1 0 2
+#    Example (on node 1):
+#      bash train_llama.sh 10.0.0.1 1 2
+#
+# 3) Single-node (no arguments):
+#      bash train_llama.sh
+#
+# ─── Key Environment Variables ──────────────────────────────────────────────
+#
+#   NNODES              Number of nodes (default: 1)
+#   NPROC_PER_NODE      GPUs per node (default: 8)
+#   MASTER_ADDR         Master node IP (auto-detected in controller mode)
+#   MASTER_PORT         Master port (default: 29600)
+#   LAUNCH_MODE         "single" (DeepSpeed SSH) or "multi" (torchrun per node)
+#   USE_FSDP_FULLY_SHARDED  Set to 1 to use PyTorch FSDP fully-sharded mode
+#   WORKDIR             Shared filesystem path (default: script directory)
+#   CLUSTER_NODE_IPS    Override node pool IPs (space-separated)
+#
+# ─── Prerequisites ──────────────────────────────────────────────────────────
+#
+#   - Passwordless SSH between all nodes (for controller mode)
+#   - Shared filesystem accessible from all nodes at the same path
+#   - CUDA-capable GPUs with PyTorch + DeepSpeed/FSDP installed
+#
+###############################################################################
 set -euo pipefail
 
 # ========================================
-# 网络代理配置（可选）
-# 如果需要通过代理访问外网，取消以下注释并修改为你的代理地址
+# Network proxy (optional)
+# Uncomment and modify if you need proxy access for model downloads.
 # ========================================
 # export http_proxy=http://your-proxy-host:port
 # export https_proxy=http://your-proxy-host:port
@@ -12,11 +56,10 @@ set -euo pipefail
 # export no_proxy=localhost,127.0.0.1,.local,.internal
 
 # ========================================
-# HuggingFace 镜像配置（可选）
-# 如果在中国网络环境，使用 HF 镜像加速模型下载
+# HuggingFace mirror (optional)
+# Uncomment if behind the GFW or in restricted network environments.
 # ========================================
 # export HF_ENDPOINT=https://hf-mirror.com
-# ========================================
 
 export CLUSTER_ENV_SETUP='source ~/.bashrc && conda activate minillm &&'
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -58,7 +101,8 @@ fi
 
 echo "Training launched (LLaMA-2-7B, continuous mask, Hutchinson Hessian)."
 
-# 默认 master 地址（rank0）和备节点地址（rank1），仅在多机模式下使用
+# Default master (rank0) and worker (rank1) addresses — only used in multi-node mode.
+# >>> Replace with your actual node IPs <<<
 DEFAULT_MASTER_ADDR=<MASTER_IP>
 DEFAULT_WORKER_ADDR=<WORKER_IP>
 export NCCL_DEBUG=INFO
@@ -93,9 +137,9 @@ fi
 # - multi: run on EACH node; specify NODE_RANK explicitly; DeepSpeed will NOT ssh.
 LAUNCH_MODE=${LAUNCH_MODE:-single}
 
-# 启动参数： ./train_llama.sh [MASTER_ADDR] [NODE_RANK] [NNODES]
-# 注意：只有当第一个参数看起来像 IP 地址时才解析为 MASTER_ADDR
-# 否则认为是直接传递给 main_llama.py 的参数
+# Legacy positional args: ./train_llama.sh [MASTER_ADDR] [NODE_RANK] [NNODES]
+# Note: the first arg is treated as MASTER_ADDR only if it looks like an IP address;
+# otherwise it is forwarded directly to main_llama.py.
 MASTER_ADDR_ARG=""
 NODE_RANK_ARG=""
 NNODES_ARG=""
@@ -135,8 +179,8 @@ else
   export MASTER_ADDR=${MASTER_ADDR_ARG:-${MASTER_ADDR:-$DEFAULT_MASTER_ADDR}}
   if [ "${LAUNCH_MODE}" = "single" ]; then
     if [ "${NODE_RANK}" -ne 0 ]; then
-      echo "[LAUNCH_MODE=single] 请只在 master 节点运行本脚本 (NODE_RANK=0)。"
-      echo "  当前 NODE_RANK=${NODE_RANK}，将直接退出以避免重复/冲突拉起。"
+echo "[LAUNCH_MODE=single] This script should only run on the master node (NODE_RANK=0)."
+      echo "  Current NODE_RANK=${NODE_RANK}; exiting to avoid duplicate launches."
       exit 0
     fi
     if [ ! -f "${DEEPSPEED_HOSTFILE}" ]; then
@@ -258,7 +302,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 # Debug: Print the actual command that will be executed
 if [[ "${DEBUG_LAUNCH:-0}" == "1" ]]; then
   echo "[DEBUG] Command: ${launch_cmd[@]}"
-  echo "[DEBUG] Main script: main_llama.py"
+echo "[DEBUG] Main script: legacy/main_llama.py"
   echo "[DEBUG] Total args: ${#args[@]}"
   echo "[DEBUG] Args: ${args[@]}"
 fi
@@ -278,7 +322,7 @@ if [[ "${INTERNAL_LAUNCH:-0}" != "1" ]]; then
     shift "$consume"
   fi
 fi
-# 跳过 -- 分隔符（如果存在），将后续参数传递给 main_llama.py
+# Skip the -- separator (if present) and forward remaining args to main_llama.py
 if [[ $# -ge 1 ]] && [[ "$1" == "--" ]]; then
   shift
 fi
@@ -305,4 +349,4 @@ fi
 # detect launcher name for clearer logging
 launcher_name="${launch_cmd[0]}"
 echo "Launching with ${launcher_name}"
-"${launch_cmd[@]}" main_llama.py "${args[@]}"
+"${launch_cmd[@]}" legacy/main_llama.py "${args[@]}"

@@ -1,3 +1,14 @@
+"""Sparse modeling primitives: SparseLinear, Distill_Model, and mask operations.
+
+This module implements the core sparse layer abstraction (``SparseLinear``) that
+replaces standard ``nn.Linear`` layers with learnable sparsity masks.  It also
+provides the ``Distill_Model`` wrapper for knowledge distillation training.
+
+Key components:
+- ``SparseLinearConfig`` : Dataclass configuring mask type, sparsity ratio, etc.
+- ``SparseLinear``       : Drop-in replacement for nn.Linear with soft/hard masks.
+- ``Distill_Model``      : Wrapper coordinating student + teacher forward passes.
+"""
 # sparse_modeling.py
 import os
 import torch
@@ -448,13 +459,14 @@ class SparseLinear(nn.Linear):
 
     @torch.no_grad()
     def _blockify_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """将 2D tensor 按 block 取均值，使同一 block 内所有元素相同。
+        """Average a 2D tensor by block, making all elements within a block identical.
         
-        仅在 hard_mask_type 为 block_sparse16 或 block_sparse32 时生效。
-        对于 1D tensor 或非 block_sparse 模式，直接返回原始 tensor。
+        Only effective when hard_mask_type is block_sparse16 or block_sparse32.
+        For 1D tensors or non-block-sparse modes, returns the original tensor.
         
-        这确保了 soft mask 在训练过程中始终维护 block 粒度的一致性，
-        避免 block 内部元素的 mask 值分化导致 hardening 时的剧烈跳变。
+        This ensures the soft mask maintains block-granularity consistency during
+        training, preventing intra-block mask value divergence that would cause
+        abrupt jumps during hardening.
         """
         hard_type = str(getattr(self, 'hard_mask_type', 'match') or 'match')
         if hard_type == 'block_sparse16':

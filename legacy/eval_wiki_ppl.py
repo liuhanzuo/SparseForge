@@ -42,6 +42,10 @@ import argparse
 import gc
 import os
 import sys
+
+# Ensure parent directory is on sys.path so that `sparseforge` and `channel_pruning` are importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 import torch
 import torch.nn as nn

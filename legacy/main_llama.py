@@ -5,10 +5,14 @@ mid-penalty, sparsity penalties, and distillation (all losses exactly as GPT).
 Default weights: NousResearch/Llama-2-7b-hf
 """
 import os
+import sys
+
+# Ensure parent directory is on sys.path so that `sparseforge` package is importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 import json
 import math
-import sys
 import atexit
 import traceback
 from contextlib import nullcontext
@@ -47,80 +51,34 @@ from utils import (
 from model_llama import LlamaSparse
 import torch.distributed as dist
 
-
-def _dist_is_ready() -> bool:
-    return bool(dist.is_available() and dist.is_initialized())
-
-def _safe_barrier() -> None:
-    if not _dist_is_ready():
-        return
-    # Note: timeout parameter not supported in older PyTorch versions
-    # Use NCCL_TIMEOUT environment variable (set in train_llama.sh) instead
-    dist.barrier()
-
-
-# ========== MULTI-NODE DEBUG LOGGING ==========
-# Write debug messages to a shared file so we can see all nodes' output
-# (since SSH redirects stdout to per-node log files)
-_DEBUG_LOG_FILE = None
-_DEBUG_LOG_ENABLED = False  # Set to True to enable debug file logging
-
-def _init_debug_log():
-    """Initialize per-rank debug log file in shared filesystem."""
-    global _DEBUG_LOG_FILE
-    if not _DEBUG_LOG_ENABLED:
-        return
-    try:
-        trace_dir = os.environ.get('AST_TRACE_DIR', '/apdcephfs/pig_data/Adaptive-Sparse-Trainer/outputs/debug_logs')
-        os.makedirs(trace_dir, exist_ok=True)
-        rank = dist.get_rank() if _dist_is_ready() else 0
-        world_size = dist.get_world_size() if _dist_is_ready() else 1
-        node_id = rank // 8
-        local_id = rank % 8
-        log_path = os.path.join(trace_dir, f"rank_{rank:03d}_node{node_id}_local{local_id}.log")
-        _DEBUG_LOG_FILE = open(log_path, 'w', buffering=1)  # Line buffered
-        _debug_log(f"=== Debug log initialized: rank={rank}, world_size={world_size}, node={node_id}, local={local_id} ===")
-    except Exception as e:
-        print(f"[WARNING] Failed to init debug log: {e}", flush=True)
-
-def _debug_log(msg: str):
-    """Write debug message to log file only (no stdout to keep console clean)."""
-    try:
-        if _DEBUG_LOG_FILE is None:
-            return  # No log file, skip entirely
-        rank = dist.get_rank() if _dist_is_ready() else 0
-        node_id = rank // 8
-        local_id = rank % 8
-        timestamp = time.strftime("%H:%M:%S")
-        full_msg = f"[{timestamp}][NODE {node_id} | RANK {rank} | LOCAL {local_id}] {msg}"
-        _DEBUG_LOG_FILE.write(full_msg + "\n")
-        _DEBUG_LOG_FILE.flush()
-    except Exception:
-        pass
-
-def _close_debug_log():
-    """Close debug log file."""
-    global _DEBUG_LOG_FILE
-    if _DEBUG_LOG_FILE is not None:
-        try:
-            _DEBUG_LOG_FILE.close()
-        except:
-            pass
-        _DEBUG_LOG_FILE = None
-
-# Register cleanup
-atexit.register(_close_debug_log)
+# ---------------------------------------------------------------------------
+# Distributed / debug-log / memory helpers are centralized in
+# ``sparseforge.distributed``.  We keep a thin local ``log_memory`` wrapper so
+# existing call sites (which rely on the module-level ``master_process``) need
+# not be touched.
+# ---------------------------------------------------------------------------
+from sparseforge.distributed import (
+    _dist_is_ready,
+    _safe_barrier,
+    _init_debug_log,
+    _debug_log,
+    _close_debug_log,
+    log_memory as _log_memory_impl,
+)
+from sparseforge.data_pipeline import (
+    load_memmap,
+    AsyncDataPrefetcher,
+    make_get_batch,
+    PREFETCH_ENABLED,
+)
+from sparseforge.optim_utils import make_lr_schedule, make_decay_schedule
+from sparseforge.eval_utils import make_estimate_loss
 
 
-# Memory monitoring utility
 def log_memory(label: str):
-    """Log current GPU memory usage."""
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        if master_process:
-            print(f"[MEMORY] {label}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
+    """Log current GPU memory usage (thin wrapper bound to module-level master_process)."""
+    _log_memory_impl(label, master_process=master_process)
+
 
 try:
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -147,130 +105,17 @@ except Exception:
     BackwardPrefetch = None
     init_device_mesh = None
 
-import argparse
+import argparse  # kept for any downstream helpers that still expect the module
 
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    if s in {"1","true","t","yes","y","on"}:
-        return True
-    if s in {"0","false","f","no","n","off"}:
-        return False
-    raise argparse.ArgumentTypeError(f"invalid boolean value: {v!r}")
+# ---------------------------------------------------------------------------
+# CLI definition is centralized in ``sparseforge.cli``.  Build the parser
+# there so this file stays focused on training logic.  The parser returned
+# has been verified bit-exact (argument names / defaults / types / choices)
+# against the original inline definition.
+# ---------------------------------------------------------------------------
+from sparseforge.cli import build_llama_parser
 
-parser = argparse.ArgumentParser(description="Train LLaMA with SparseLinear pruning")
-parser.add_argument('--student_model', type=str, default='NousResearch/Llama-2-7b-hf')
-parser.add_argument('--teacher_model', type=str, default='NousResearch/Llama-2-7b-hf')
-parser.add_argument('--distill_model', type=str2bool, default=False)
-parser.add_argument('--hardness_task', type=float, default=1.0)
-parser.add_argument('--hardness_kldiv', type=float, default=1.0)
-parser.add_argument('--hardness_squarehead', type=float, default=1.0)
-parser.add_argument('--eval_interval', type=int, default=200)
-parser.add_argument('--skip_wiki_ppl', type=str2bool, default=True)  # Skip WikiText PPL by default (stability)
-# Backward-compat: older launchers used --skip_eval to mean "skip wiki_ppl".
-parser.add_argument('--skip_eval', type=str2bool, default=None)  # DEPRECATED alias of --skip_wiki_ppl
-
-# lm_eval harness 评估（finalization 阶段）
-parser.add_argument('--finalize_lm_eval', type=str2bool, default=False, help='在 finalization（post-finalize finetune）阶段的每次 eval 时运行 lm_eval harness，并保存 lm_eval mean accuracy 最佳的 checkpoint')
-parser.add_argument('--lm_eval_tasks', type=str, default='boolq,rte,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa', help='lm_eval 评估的任务列表，逗号分隔')
-parser.add_argument('--lm_eval_batch_size', type=int, default=4, help='lm_eval 评估的 batch size')
-
-parser.add_argument('--save_interval', type=int, default=None)
-parser.add_argument('--log_interval', type=int, default=10)
-parser.add_argument('--eval_iters', type=int, default=20)
-parser.add_argument('--output_flip_every', type=int, default=10)
-parser.add_argument('--global_batch_size', type=int, default=64)
-parser.add_argument('--batch_size', type=int, default=1)
-parser.add_argument('--learning_rate', type=float, default=1e-4)
-parser.add_argument('--weight_decay', type=float, default=0.1)
-parser.add_argument('--min_lr', type=float, default=1e-5)
-parser.add_argument('--srste_decay', type=float, default=6e-5)
-parser.add_argument('--max_iters', type=int, default=20000)
-parser.add_argument('--warmup_iters', type=int, default=1000)
-parser.add_argument('--lr_decay_iters', type=int, default=20000)
-parser.add_argument('--increase_step', type=int, default=10000)
-parser.add_argument('--mode', choices=['sparse_forward', 'dense_forward'], default='sparse_forward')
-parser.add_argument('--mask_type', choices=['structured', 'unstructured'], default='structured')
-parser.add_argument('--hard_mask_type', choices=['match','unstructured','structured','block16','block_sparse16','block_sparse32','nm_2_4'], default='match')
-parser.add_argument('--mask_metric', choices=['wanda','movement','hessian_obd','hessian_ratio','magnitude'], default='magnitude')
-parser.add_argument('--change_mask', type=str2bool, default=False)
-parser.add_argument('--beta', type=float, default=0.99)
-parser.add_argument('--temperature', type=float, default=1.0)
-parser.add_argument('--mask_warmup_steps', type=int, default=0)
-parser.add_argument('--mask_transition_steps', type=int, default=0)
-parser.add_argument('--hybrid_alpha', type=float, default=1.0)
-parser.add_argument('--sparsity_ratio', type=float, default=0.5)
-parser.add_argument('--SLoRB_k', type=int, default=64)
-parser.add_argument('--SLoRB', type=str2bool, default=False)
-parser.add_argument('--SLoRB_init_type', choices=['mean','sum','xavier'], default='mean')
-parser.add_argument('--trainable_projection', type=str2bool, default=False)
-parser.add_argument('--gradient_checkpointing', type=str2bool, default=False)
-parser.add_argument('--wandb_logging', type=str2bool, default=False)
-parser.add_argument('--lambda_mid_max', type=float, default=0.01)
-parser.add_argument('--enable_hutchinson', type=str2bool, default=False)
-parser.add_argument('--hardening_period', type=int, default=2000)
-parser.add_argument('--hardening_fraction', type=float, default=0.2)
-parser.add_argument('--hardening_band_low', type=float, default=0.4)
-parser.add_argument('--hardening_band_high', type=float, default=0.6)
-parser.add_argument('--wandb_project', type=str, default='LLaMA-Sparse')
-parser.add_argument('--wandb_run_name', type=str, default='llama-7b')
-parser.add_argument('--dtype', type=str, default='auto', choices=['auto','float16','bfloat16','float32'])
-parser.add_argument('--eager_attention', type=str2bool, default=False, help='Use eager (manual) attention instead of Flash Attention. Required for Hutchinson Hessian estimation.')
-parser.add_argument('--use_fsdp', type=str2bool, default=True)  # Default to True for multi-GPU to avoid OOM
-parser.add_argument('--fsdp_mode', type=str, default='fully_sharded', choices=['fully_sharded','shard_grad_op','no_shard', 'hybrid_sharded'])
-parser.add_argument('--fsdp_cpu_offload', type=str2bool, default=False)
-parser.add_argument('--fsdp_mixed_precision', type=str2bool, default=True)
-parser.add_argument('--local_rank', type=int, default=0)
-parser.add_argument('--mask_update_period', type=int, default=10)
-parser.add_argument('--mask_update_switch_step', type=int, default=0)
-parser.add_argument('--mask_update_period_before', type=int, default=None)
-parser.add_argument('--mask_update_period_after', type=int, default=None)
-parser.add_argument('--mask_lr', type=float, default=0.1)
-parser.add_argument('--mask_penalty_lr', type=float, default=None)
-parser.add_argument('--mask_penalty_lr_min', type=float, default=None, help='If set, enables penalty lr schedule: start at min, grow to mask_penalty_lr')
-parser.add_argument('--mask_penalty_lr_schedule', type=str, choices=['constant', 'linear', 'cosine'], default='constant', help='Schedule for mask_penalty_lr: constant (no change), linear (from min to max), cosine (slow start fast end)')
-parser.add_argument('--mask_penalty_mode', choices=['mid','structured_topn','block16','block_sparse16','block_sparse32','nm_2_4'], default='mid')
-parser.add_argument('--score_ema_beta', type=float, default=0.99)
-parser.add_argument('--temp_init', type=float, default=1.0)
-parser.add_argument('--temp_min', type=float, default=0.05)
-parser.add_argument('--temp_decay', type=float, default=0.97)
-parser.add_argument('--sparsity_warmup_steps', type=int, default=0)
-parser.add_argument('--structured_n', type=int, default=2)
-parser.add_argument('--structured_m', type=int, default=4)
-parser.add_argument('--tau_sample_size', type=int, default=262144)
-parser.add_argument('--sparsity_alpha', type=float, default=0.0)
-parser.add_argument('--mask_hardening_start', type=int, default=0)
-parser.add_argument('--mask_hardening_duration', type=int, default=10000)
-parser.add_argument('--structured_exact', type=str2bool, default=False)
-parser.add_argument('--beta_structural_start', type=int, default=0, help='step where β structural mixing starts rising from 0')
-parser.add_argument('--beta_structural_end', type=int, default=0, help='step where β structural mixing reaches 1.0 (0=disabled)')
-parser.add_argument('--glu_joint_mask', type=str2bool, default=False, help='For GLU architectures (LLaMA/Qwen/Mistral), use joint gate/up mask to ensure aligned pruning')
-parser.add_argument('--weight_scaling', type=str2bool, default=False, help='(CAST) Enable weight scaling to compensate energy loss from sparsification. Scale = M/N for structured, 1/(1-sr) for unstructured.')
-parser.add_argument('--adaptive_l1_decay', type=float, default=0.0, help='(CAST AdamS) Adaptive L1 decay strength. Applied as sign(w)*lambda/denom to drive small weights toward zero. Recommended: 1e-4 ~ 1e-3.')
-parser.add_argument('--final_finetune_iters', type=int, default=1000)
-parser.add_argument('--freeze_low', type=float, default=0.0)
-parser.add_argument('--freeze_high', type=float, default=1.0)
-parser.add_argument('--use_deepspeed', action='store_true')
-parser.add_argument('--deepspeed_config', type=str, default='configs/deepspeed_xl.json')
-parser.add_argument('--out_dir', type=str, default='out_llama')
-parser.add_argument('--dataset', type=str, default='c4_dataset')
-
-# Resume training 参数
-parser.add_argument('--resume', type=str2bool, default=False, help='是否从 checkpoint 恢复训练')
-parser.add_argument('--resume_dir', type=str, default=None, help='checkpoint 目录路径（包含 model.pt）。如果为 None，将尝试从 out_dir/last 恢复')
-parser.add_argument('--resume_optimizer', type=str2bool, default=True, help='是否恢复 optimizer 状态')
-
-# PyTorch Profiler 参数 (用于分析 compute-bound vs communication-bound)
-parser.add_argument('--enable_profiler', type=str2bool, default=False, help='启用 PyTorch Profiler 分析性能瓶颈')
-parser.add_argument('--profiler_start_step', type=int, default=50, help='Profiler 开始记录的步数')
-parser.add_argument('--profiler_warmup_steps', type=int, default=3, help='Profiler 预热步数')
-parser.add_argument('--profiler_active_steps', type=int, default=5, help='Profiler 活跃记录步数')
-parser.add_argument('--profiler_repeat', type=int, default=1, help='Profiler 重复次数')
-parser.add_argument('--profiler_log_interval', type=int, default=500, help='Profiler 统计 log 间隔')
-
+parser = build_llama_parser()
 args = parser.parse_args()
 
 # Backward-compat mapping for old flag name.
@@ -446,17 +291,11 @@ else:
             print(f"[DATA] No dtype.txt or metadata.json found, defaulting to uint16")
 
 def _load_bin(path, default_dtype):
-    """加载 .bin 文件，如果 default_dtype 不兼容（文件大小非整数倍），自动回退到 uint16"""
-    file_size = os.path.getsize(path)
-    dtype_size = np.dtype(default_dtype).itemsize
-    if file_size % dtype_size != 0:
-        fallback_dtype = np.uint16
-        if master_process:
-            print(f"[DATA] WARNING: {os.path.basename(path)} size ({file_size} bytes) "
-                  f"is not a multiple of {default_dtype.__name__} ({dtype_size} bytes), "
-                  f"falling back to {fallback_dtype.__name__}")
-        return np.memmap(path, dtype=fallback_dtype, mode='r'), fallback_dtype
-    return np.memmap(path, dtype=default_dtype, mode='r'), default_dtype
+    """Thin wrapper around ``sparseforge.data_pipeline.load_memmap`` that
+    preserves the original ``_load_bin(path, default_dtype)`` signature and
+    binds ``master_process`` from module scope for the warning message.
+    """
+    return load_memmap(path, default_dtype, master_process=master_process)
 
 train_data, train_dtype = _load_bin(os.path.join(data_dir, 'train.bin'), data_dtype)
 val_data, val_dtype = _load_bin(os.path.join(data_dir, 'val.bin'), data_dtype)
@@ -470,117 +309,29 @@ VOCAB_SIZE_CHECK = None
 # ============================================================================
 # Async Data Prefetcher for better GPU utilization
 # ============================================================================
-import threading
-import queue
-
-class AsyncDataPrefetcher:
-    """
-    异步数据预取器：在 GPU 计算时，后台线程预先准备下一批数据。
-    这样可以减少 GPU 等待数据加载的时间，提高利用率。
-    """
-    def __init__(self, data, block_size, batch_size, device, prefetch_count=2):
-        self.data = data
-        self.block_size = block_size
-        self.batch_size = batch_size
-        self.device = device
-        self.prefetch_count = prefetch_count
-        self.queue = queue.Queue(maxsize=prefetch_count)
-        self.stop_event = threading.Event()
-        self.thread = None
-        
-    def _prefetch_worker(self):
-        """后台线程：持续预取数据"""
-        while not self.stop_event.is_set():
-            try:
-                # 生成随机索引
-                ix = torch.randint(len(self.data) - self.block_size - 1, (self.batch_size,))
-                # 从 memmap 读取数据（CPU 操作）
-                x = torch.stack([torch.from_numpy((self.data[i : i + self.block_size]).astype(np.int64)) for i in ix])
-                y = torch.stack([torch.from_numpy((self.data[i + 1 : i + 1 + self.block_size]).astype(np.int64)) for i in ix])
-                # Pin memory 以加速 GPU 传输
-                x = x.pin_memory()
-                y = y.pin_memory()
-                # 放入队列（如果满了会阻塞）
-                self.queue.put((x, y), timeout=1.0)
-            except queue.Full:
-                continue
-            except Exception as e:
-                if not self.stop_event.is_set():
-                    print(f"[Prefetcher] Error: {e}")
-                break
-                
-    def start(self):
-        """启动预取线程"""
-        if self.thread is None or not self.thread.is_alive():
-            self.stop_event.clear()
-            self.thread = threading.Thread(target=self._prefetch_worker, daemon=True)
-            self.thread.start()
-            
-    def stop(self):
-        """停止预取线程"""
-        self.stop_event.set()
-        if self.thread is not None:
-            self.thread.join(timeout=2.0)
-            
-    def get_batch(self):
-        """获取预取的数据批次"""
-        try:
-            x, y = self.queue.get(timeout=10.0)
-            # 异步传输到 GPU
-            x = x.to(self.device, non_blocking=True)
-            y = y.to(self.device, non_blocking=True)
-            return x, y
-        except queue.Empty:
-            # 队列为空，回退到同步加载
-            return None
+# Implementation now lives in ``sparseforge.data_pipeline.AsyncDataPrefetcher``.
+# Behaviour is bit-identical to the original inline class.
 
 # 全局预取器实例（训练循环开始后初始化）
 train_prefetcher = None
-PREFETCH_ENABLED = os.environ.get('DISABLE_PREFETCH', '0') != '1'
 
-def get_batch(split):
-    global train_prefetcher
-    
-    # 训练时使用异步预取器（如果已启用）
-    if split == 'train' and PREFETCH_ENABLED and train_prefetcher is not None:
-        result = train_prefetcher.get_batch()
-        if result is not None:
-            x, y = result
-            # 检查 vocab size
-            if VOCAB_SIZE_CHECK is not None:
-                max_id = int(x.max().item())
-                if max_id >= int(VOCAB_SIZE_CHECK):
-                    raise ValueError(
-                        f"Dataset token id out of range: max_id={max_id} >= vocab_size={int(VOCAB_SIZE_CHECK)}. "
-                    )
-            return x, y
-        # 如果队列为空，回退到同步加载
-    
-    # 同步加载（用于验证集或预取器未启用时）
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size - 1, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i + 1 : i + 1 + block_size]).astype(np.int64)) for i in ix])
-
-    # Guardrail: CUDA device-side asserts often come from input_ids >= vocab_size.
-    # This happens if the dataset was tokenized with a different tokenizer (e.g. GPT-2 vocab 50k)
-    # but the model expects LLaMA vocab 32k.
-    if VOCAB_SIZE_CHECK is not None:
-        max_id = int(x.max().item())
-        if max_id >= int(VOCAB_SIZE_CHECK):
-            raise ValueError(
-                f"Dataset token id out of range: max_id={max_id} >= vocab_size={int(VOCAB_SIZE_CHECK)}. "
-                f"Your dataset '{args.dataset}' is likely tokenized for a different tokenizer. "
-                f"Re-tokenize with the LLaMA tokenizer or switch to a LLaMA-tokenized dataset. "
-                f"If you want to generate a compatible memmap from data/c4_dataset shards, run: "
-                f"python data/c4_llama/prepare.py --tokenizer {args.student_model}"
-            )
-    if device_type == 'cuda':
-        x = x.pin_memory().to(device, non_blocking=True)
-        y = y.pin_memory().to(device, non_blocking=True)
-    else:
-        x, y = x.to(device), y.to(device)
-    return x, y
+# ``get_batch`` is built by ``make_get_batch`` so that all its dependencies
+# (train/val memmaps, block_size, batch_size, device, device_type, and the
+# late-bound ``VOCAB_SIZE_CHECK`` / ``train_prefetcher`` globals) are passed
+# explicitly.  We use getters for the two late-bound globals to preserve the
+# original ``global`` semantics.
+get_batch = make_get_batch(
+    train_data=train_data,
+    val_data=val_data,
+    block_size=block_size,
+    batch_size=batch_size,
+    device=device,
+    device_type=device_type,
+    vocab_size_check_getter=lambda: VOCAB_SIZE_CHECK,
+    dataset_name=args.dataset,
+    student_model_name=args.student_model,
+    prefetcher_getter=lambda: train_prefetcher,
+)
 
 # model config
 sparselinear_config = SparseLinearConfig(
@@ -628,12 +379,12 @@ override_args = dict(dropout=0.0, output_hidden_state=False, gradient_checkpoint
 
 # Hutchinson Hessian estimation requires second-order derivatives,
 # but Flash Attention (SDPA) backward doesn't support them.
-# 必须开启 eager_attention 才能使用 Hutchinson。
+    # Must enable eager_attention for Hutchinson to work.
 if args.enable_hutchinson and not args.eager_attention:
     raise RuntimeError(
-        "[Hutchinson] enable_hutchinson=True 但 eager_attention=False。"
-        "Flash Attention (SDPA) 不支持二阶反向传播，Hutchinson 无法工作。"
-        "请设置 --eager_attention True 或关闭 --enable_hutchinson False。"
+    "[Hutchinson] enable_hutchinson=True but eager_attention=False. "
+    "Flash Attention (SDPA) does not support second-order backward; Hutchinson will not work. "
+    "Please set --eager_attention True or disable --enable_hutchinson False."
     )
 if args.enable_hutchinson and args.eager_attention and master_process:
     print("[Hutchinson] Enabled with eager attention. Full Hessian estimation supported.")
@@ -1166,60 +917,38 @@ if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
 else:
     scaler = torch.cuda.amp.GradScaler(enabled=((dtype == 'float16') and (not args.use_deepspeed)))
 
-# lr schedule
-def get_lr(it):
-    if it < warmup_iters:
-        return learning_rate * it / max(1, warmup_iters)
-    if it > lr_decay_iters:
-        return min_lr
-    decay_ratio = (it - warmup_iters) / max(1, (lr_decay_iters - warmup_iters))
-    decay_ratio = min(1.0, max(0.0, float(decay_ratio)))
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return min_lr + coeff * (learning_rate - min_lr)
+# ---------------------------------------------------------------------------
+# LR/decay schedules and evaluation helper are factored out to
+# ``sparseforge.optim_utils`` and ``sparseforge.eval_utils``.  Here we build
+# concrete closures that bind this script's (module-level) hyper-parameters.
+# ---------------------------------------------------------------------------
+get_lr = make_lr_schedule(
+    warmup_iters=warmup_iters,
+    lr_decay_iters=lr_decay_iters,
+    learning_rate=learning_rate,
+    min_lr=min_lr,
+)
 
-def get_decay(it):
-    inc = int(args.increase_step)
-    dmax = float(args.srste_decay)
-    if dmax <= 0.0:
-        return 0.0
-    if it < inc:
-        return dmax / max(1, inc) * it
-    return dmax
+get_decay = make_decay_schedule(
+    increase_step=int(args.increase_step),
+    srste_decay=float(args.srste_decay),
+)
 
-# eval helper
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    # IMPORTANT: under FSDP, calling the unwrapped module (`.module`) will see sharded/flattened
-    # parameter views (e.g. embedding weights become 1-D), which breaks forward. Always run the
-    # wrapped `model` for eval when using FSDP/DDP.
-    # For distill training, evaluate student-only (no teacher forward needed).
-    if args.distill_model:
-        container = model.module if hasattr(model, "module") else model
-        eval_model = container.student
-    else:
-        eval_model = model
-    eval_model.eval()
-    for split in ['train','val']:
-        losses = torch.zeros(args.eval_iters)
-        for k in range(args.eval_iters):
-            X, Y = get_batch(split)
-            with ctx:
-                logits, loss, _ = eval_model(X, Y)
-            losses[k] = loss.item()
-            # Explicitly delete large tensors to free memory during eval loop
-            del logits, loss, X, Y
-        out[split] = losses.mean().item()
-        # Clear cache between train/val splits
-        torch.cuda.empty_cache()
-    eval_model.train()
-    return out
+estimate_loss = make_estimate_loss(
+    model=model,
+    distill_model=bool(args.distill_model),
+    eval_iters=int(args.eval_iters),
+    get_batch=get_batch,
+    ctx=ctx,
+    master_process=master_process,
+    variant='llama',
+)
 
 # Training loop: FULLY ALIGNED with main.py
 iter_num = 0
 best_val_loss = None
 best_wiki_ppl = 1e9
-best_lm_eval_mean = 0.0  # 跟踪 finalization 阶段 lm_eval 的最佳 mean accuracy
+best_lm_eval_mean = 0.0  # Track best mean accuracy during finalization stage
 eval_count = 0
 always_save_checkpoint = False
 save_interval = int(args.save_interval) if args.save_interval is not None else int(args.eval_interval)
@@ -1228,7 +957,7 @@ save_interval = int(args.save_interval) if args.save_interval is not None else i
 if args.resume:
     resume_ckpt_dir = args.resume_dir
     if resume_ckpt_dir is None:
-        # 尝试从 out_dir/last 符号链接恢复
+        # Try to resume from out_dir/last symlink
         last_link = os.path.join(out_dir, "last")
         last_dir_file = os.path.join(out_dir, "last_dir.txt")
         if os.path.islink(last_link) or os.path.isdir(last_link):
@@ -1243,16 +972,16 @@ if args.resume:
             if master_process:
                 print(f"[RESUME] Loading checkpoint from {model_pt_path}")
             
-            # 加载 checkpoint
+            # Load checkpoint
             resume_ckpt = torch.load(model_pt_path, map_location="cpu", weights_only=False)
             
-            # 恢复模型权重
+            # Restore model weights
             if "model_state_dict" in resume_ckpt:
                 ckpt_sd = resume_ckpt["model_state_dict"]
                 
-                # FSDP 模式：checkpoint 保存的是 FULL_STATE_DICT（无 FSDP 前缀的完整 key），
-                # 恢复时必须在 FULL_STATE_DICT context 中调用 load_state_dict，
-                # 否则 FSDP 模型的 key 格式不同会导致 strict=False 下静默跳过所有 key。
+                # FSDP mode: checkpoint stores FULL_STATE_DICT (no FSDP prefix),
+                # so we must call load_state_dict within FULL_STATE_DICT context;
+                # otherwise FSDP key format mismatch causes silent skip under strict=False.
                 try:
                     if using_fsdp and FSDP is not None and StateDictType is not None and FullStateDictConfig is not None:
                         load_target = model.student if args.distill_model else model
@@ -1266,7 +995,7 @@ if args.resume:
                                 print(f"[RESUME] Unexpected keys ({len(unexpected)}): {unexpected[:5]}..." if len(unexpected) > 5 else f"[RESUME] Unexpected keys: {unexpected}")
                             print(f"[RESUME] Model weights loaded (FSDP FULL_STATE_DICT mode)")
                     else:
-                        # 非 FSDP 模式：直接加载
+                    # Non-FSDP mode: load directly
                         missing, unexpected = model.load_state_dict(ckpt_sd, strict=False)
                         if master_process:
                             if missing:
@@ -1280,7 +1009,7 @@ if args.resume:
                         import traceback
                         traceback.print_exc()
             
-            # 恢复 optimizer 状态
+            # Restore optimizer state
             if args.resume_optimizer and "optimizer_state_dict" in resume_ckpt:
                 try:
                     optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
@@ -1293,7 +1022,7 @@ if args.resume:
                         print(f"[RESUME] GPU topologies or sharding configs. Optimizer will re-initialize.")
                         print(f"[RESUME] Training will continue with fresh optimizer momentum.")
             
-            # 恢复 scaler 状态
+            # Restore scaler state
             if "scaler_state_dict" in resume_ckpt and scaler is not None:
                 try:
                     scaler.load_state_dict(resume_ckpt["scaler_state_dict"])
@@ -1303,25 +1032,25 @@ if args.resume:
                     if master_process:
                         print(f"[RESUME] Warning: scaler restore failed: {e}")
             
-            # 恢复 iter_num
+            # Restore iter_num
             if "iter_num" in resume_ckpt:
                 iter_num = int(resume_ckpt["iter_num"])
                 if master_process:
                     print(f"[RESUME] Resuming from iter_num={iter_num}")
             
-            # 恢复 eval_count
+            # Restore eval_count
             if "eval_count" in resume_ckpt:
                 eval_count = int(resume_ckpt["eval_count"])
                 if master_process:
                     print(f"[RESUME] Restored eval_count={eval_count}")
             else:
-                # 兼容旧 checkpoint：根据 iter_num 和 eval_interval 推算
+                # Backward-compat with old checkpoints: estimate from iter_num and eval_interval
                 if iter_num > 0 and args.eval_interval > 0:
                     eval_count = iter_num // int(args.eval_interval)
                     if master_process:
                         print(f"[RESUME] eval_count not in checkpoint, estimated from iter_num: eval_count={eval_count}")
             
-            # 恢复 best_wiki_ppl（优先从 checkpoint，fallback 到 eval.json）
+            # Restore best_wiki_ppl (prefer checkpoint, fallback to eval.json)
             if "best_wiki_ppl" in resume_ckpt:
                 best_wiki_ppl = float(resume_ckpt["best_wiki_ppl"])
                 if master_process:
@@ -1340,7 +1069,7 @@ if args.resume:
                         if master_process:
                             print(f"[RESUME] Warning: failed to load eval.json: {e}")
             
-            # 清理内存
+# Clean up memory
             del resume_ckpt
             import gc
             gc.collect()
@@ -1355,7 +1084,7 @@ if args.resume:
         if master_process:
             print(f"[RESUME] Warning: resume_dir not found or invalid: {resume_ckpt_dir}")
     
-    # 同步所有 rank 的 iter_num, eval_count, best_wiki_ppl
+    # Sync iter_num, eval_count, best_wiki_ppl across all ranks
     if ddp:
         iter_num_tensor = torch.tensor([iter_num], dtype=torch.long, device=device)
         dist.broadcast(iter_num_tensor, src=0)
@@ -1438,14 +1167,14 @@ if ddp:
         print("All ranks synchronized. Starting training loop...")
         print("=" * 80)
 
-# ========== 初始化异步数据预取器 ==========
+# ========== Initialize async data prefetcher ==========
 if PREFETCH_ENABLED:
     train_prefetcher = AsyncDataPrefetcher(
         data=train_data,
         block_size=block_size,
         batch_size=batch_size,
         device=device,
-        prefetch_count=3  # 预取 3 个 batch
+        prefetch_count=3  # Prefetch 3 batches
     )
     train_prefetcher.start()
     if master_process:
@@ -1457,16 +1186,16 @@ else:
 X, Y = get_batch('train')
 t0 = time.time()
 
-# ========== PyTorch Profiler 初始化 ==========
-# 用于分析训练是 compute-bound 还是 communication-bound
-# 注意: 在 FSDP 模式下，PyTorch Profiler 可能导致 rank 间不同步，建议禁用
+# ========== PyTorch Profiler initialization ==========
+# Used to analyze whether training is compute-bound or communication-bound
+# Note: Under FSDP, PyTorch Profiler may cause rank desync; consider disabling
 profiler_ctx = None
-profiler_trace_dir = None  # Chrome trace 文件导出目录
+profiler_trace_dir = None  # Chrome trace export directory
 profiler_stats = {
     'cuda_time_total': 0.0,
     'cpu_time_total': 0.0,
-    'comm_time_total': 0.0,  # NCCL 通信时间
-    'compute_time_total': 0.0,  # 计算时间 (CUDA kernels 除去通信)
+    'comm_time_total': 0.0,  # NCCL communication time
+    'compute_time_total': 0.0,  # Compute time (CUDA kernels minus communication)
     'forward_time': 0.0,
     'backward_time': 0.0,
     'optimizer_time': 0.0,
@@ -1474,7 +1203,7 @@ profiler_stats = {
 }
 profiler_last_step_stats = {}  # 存储最近一次 step 的统计
 
-# 轻量级时间统计 (FSDP-safe，所有 rank 都可以使用)
+# Lightweight timing stats (FSDP-safe, usable on all ranks)
 step_timing = {
     'forward_ms': 0.0,
     'backward_ms': 0.0,

@@ -1,6 +1,6 @@
-"""
-Model Factory: 统一的模型创建接口，支持多种 HuggingFace 模型架构。
-支持的模型：
+"""Model Factory: unified model creation interface for multiple HuggingFace architectures.
+
+Supported models:
 - LLaMA (LLaMA-2, LLaMA-3, CodeLLaMA, etc.)
 - OPT (OPT-125m, OPT-1.3b, OPT-2.7b, OPT-6.7b, etc.)
 - GPT-2 (gpt2, gpt2-medium, gpt2-large, gpt2-xl)
@@ -18,9 +18,9 @@ import io
 import gc
 
 
-# 延迟导入，避免导入时错误
+# Lazy imports to avoid import-time errors
 def _get_model_class(model_type: str) -> Type[nn.Module]:
-    """根据模型类型返回对应的模型类。"""
+    """Return the model class corresponding to the given model type."""
     model_type = model_type.lower()
     
     if model_type == "llama":
@@ -50,43 +50,42 @@ def _get_model_class(model_type: str) -> Type[nn.Module]:
 
 
 def detect_model_type(model_name: str) -> str:
-    """
-    根据模型名称自动检测模型类型。
-    
+    """Auto-detect model type from model name.
+
     Args:
-        model_name: HuggingFace 模型名称或本地路径
-        
+        model_name: HuggingFace model name or local path.
+
     Returns:
-        模型类型字符串: "llama", "opt", "gpt2", "qwen", "mistral", "deepseek_moe", "hunyuan"
+        Model type string: "llama", "opt", "gpt2", "qwen", "mistral", "deepseek_moe", "hunyuan".
     """
     model_name_lower = model_name.lower()
     
-    # Hunyuan 系列检测（腾讯混元，基于 LLaMA 架构但有独立 wrapper）
+    # Hunyuan series (Tencent Hunyuan, LLaMA-based with custom wrapper)
     hunyuan_patterns = ['hunyuan']
     for pattern in hunyuan_patterns:
         if pattern in model_name_lower:
             return "hunyuan"
     
-    # DeepSeek MoE 检测（需要在其他 DeepSeek 模型之前检测）
-    # 注意：deepseek-moe 使用特殊的 MoE 架构，需要单独处理
+    # DeepSeek MoE detection (must come before other DeepSeek models)
+    # Note: deepseek-moe uses a special MoE architecture requiring separate handling
     deepseek_moe_patterns = ['deepseek-moe', 'deepseek_moe', 'deepseekmoe']
     for pattern in deepseek_moe_patterns:
         if pattern in model_name_lower:
             return "deepseek_moe"
     
-    # Qwen 系列检测（Qwen2, Qwen2.5 等）
+    # Qwen series (Qwen2, Qwen2.5, etc.)
     qwen_patterns = ['qwen', 'qwen2', 'qwen1.5', 'qwen-']
     for pattern in qwen_patterns:
         if pattern in model_name_lower:
             return "qwen"
     
-    # Mistral 系列检测
+    # Mistral series
     mistral_patterns = ['mistral', 'mixtral']
     for pattern in mistral_patterns:
         if pattern in model_name_lower:
             return "mistral"
     
-    # LLaMA 系列检测
+    # LLaMA series
     llama_patterns = [
         'llama', 'codellama', 'vicuna', 'alpaca', 
         'yi-', 'deepseek',  # DeepSeek dense models (non-MoE) use LLaMA architecture
@@ -96,45 +95,45 @@ def detect_model_type(model_name: str) -> str:
         if pattern in model_name_lower:
             return "llama"
     
-    # OPT 系列检测
+    # OPT series
     opt_patterns = ['opt-', '/opt', 'facebook/opt']
     for pattern in opt_patterns:
         if pattern in model_name_lower:
             return "opt"
     
-    # GPT-2 系列检测
+    # GPT-2 series
     gpt2_patterns = ['gpt2', 'gpt-2', 'distilgpt2']
     for pattern in gpt2_patterns:
         if pattern in model_name_lower:
             return "gpt2"
     
-    # 默认尝试 LLaMA（大多数现代模型是 LLaMA 架构）
+    # Default to LLaMA (most modern models use LLaMA architecture)
     print(f"[WARNING] Could not auto-detect model type for '{model_name}', defaulting to 'llama'")
     return "llama"
 
 
 def broadcast_state_dict(state_dict: Optional[dict], src: int = 0) -> dict:
-    """
-    将 state_dict 从 src rank broadcast 到所有其他 rank。
-    
-    策略：逐 tensor broadcast，避免序列化整个 state_dict 到 GPU 导致 OOM。
-    先 broadcast keys 列表，然后逐个 tensor broadcast。
-    
+    """Broadcast state_dict from src rank to all other ranks.
+
+    Strategy: per-tensor broadcast to avoid serializing the entire state_dict
+    to GPU (which would cause OOM). First broadcasts the key list, then
+    broadcasts each tensor individually.
+
     Args:
-        state_dict: src rank 上的模型 state_dict，其他 rank 传 None
-        src: 源 rank（默认 0）
-    
+        state_dict: Model state_dict on the src rank; other ranks pass None.
+        src: Source rank (default 0).
+
     Returns:
-        所有 rank 上都有的完整 state_dict
+        Complete state_dict available on all ranks.
     """
     import pickle
     
     rank = dist.get_rank()
     
-    # Step 1: Broadcast keys 和 metadata（使用序列化传输小数据）
+    # Step 1: Broadcast keys and metadata (serialize small data)
     if rank == src:
         keys = list(state_dict.keys())
-        # 序列化 key 列表 + 每个 tensor 的 shape/dtype
+        # Serialize key list + shape/dtype for each tensor
         meta = [(k, state_dict[k].shape, str(state_dict[k].dtype)) for k in keys]
         meta_bytes = pickle.dumps(meta)
         meta_size = torch.tensor([len(meta_bytes)], dtype=torch.long, device='cuda')
@@ -156,13 +155,13 @@ def broadcast_state_dict(state_dict: Optional[dict], src: int = 0) -> dict:
     del meta_tensor
     torch.cuda.empty_cache()
     
-    # Step 2: 逐个 tensor broadcast
-    # 为了效率，将小 tensor 打包一起传输，大 tensor 单独传输
+    # Step 2: Per-tensor broadcast
+    # For efficiency, batch small tensors together; large tensors are sent individually
     CHUNK_SIZE = 256 * 1024 * 1024  # 256MB per chunk
     
     result_sd = {} if rank != src else state_dict
     
-    # 将 tensors 分组：累积到 chunk_size 后一起传输
+    # Group tensors: accumulate until chunk_size then transmit together
     current_chunk_keys = []
     current_chunk_size = 0
     chunks = []
@@ -171,7 +170,7 @@ def broadcast_state_dict(state_dict: Optional[dict], src: int = 0) -> dict:
         tensor_bytes = 1
         for s in shape:
             tensor_bytes *= s
-        # 根据 dtype 估算字节数
+        # Estimate byte count based on dtype
         if '16' in dtype_str:
             tensor_bytes *= 2
         elif '32' in dtype_str:
@@ -190,7 +189,7 @@ def broadcast_state_dict(state_dict: Optional[dict], src: int = 0) -> dict:
     if current_chunk_keys:
         chunks.append(current_chunk_keys)
     
-    # 逐 chunk 传输
+    # Transmit chunk by chunk
     for chunk_keys in chunks:
         for key, shape, dtype_str in chunk_keys:
             dtype_map = {
@@ -230,49 +229,48 @@ def get_sparse_model(
     sparselinear_config=None,
     is_teacher: bool = False,
 ) -> nn.Module:
-    """
-    通用模型工厂函数：根据模型名称或类型创建带 SparseLinear 的模型。
-    
+    """Universal model factory: create a model with SparseLinear layers.
+
     Args:
-        model_name: HuggingFace 模型名称或本地路径
-        model_type: 可选，显式指定模型类型 ("llama", "opt", "gpt2", "qwen", "mistral", "deepseek_moe")
-                   如果不指定，会自动检测
-        override_args: 配置覆盖参数 (dropout, gradient_checkpointing, etc.)
-        sparselinear_config: SparseLinear 配置，为 None 时不替换为稀疏层
-        is_teacher: 是否为 teacher 模型（teacher 不使用稀疏层）
-        
+        model_name: HuggingFace model name or local path.
+        model_type: Optional, explicitly specify model type ("llama", "opt", "gpt2",
+                   "qwen", "mistral", "deepseek_moe"). Auto-detected if not specified.
+        override_args: Config overrides (dropout, gradient_checkpointing, etc.).
+        sparselinear_config: SparseLinear config; None means no sparse replacement.
+        is_teacher: Whether this is a teacher model (teachers skip sparse layers).
+
     Returns:
-        包装好的模型实例
-        
+        The constructed model instance.
+
     Example:
-        >>> # 自动检测模型类型
+        >>> # Auto-detect model type
         >>> model = get_sparse_model("NousResearch/Llama-2-7b-hf", sparselinear_config=cfg)
-        >>> 
-        >>> # 显式指定模型类型
+        >>>
+        >>> # Explicitly specify model type
         >>> model = get_sparse_model("facebook/opt-2.7b", model_type="opt", sparselinear_config=cfg)
         >>>
-        >>> # Qwen 模型
+        >>> # Qwen model
         >>> model = get_sparse_model("Qwen/Qwen2.5-1.5B", sparselinear_config=cfg)
         >>>
-        >>> # Mistral 模型
+        >>> # Mistral model
         >>> model = get_sparse_model("mistralai/Mistral-7B-v0.3", sparselinear_config=cfg)
         >>>
-        >>> # DeepSeek MoE 模型
+        >>> # DeepSeek MoE model
         >>> model = get_sparse_model("deepseek-ai/deepseek-moe-16b-base", sparselinear_config=cfg)
         >>>
-        >>> # Hunyuan 模型
+        >>> # Hunyuan model
         >>> model = get_sparse_model("tencent/Hunyuan-1.8B-Pretrain", sparselinear_config=cfg)
     """
-    # 自动检测或使用指定的模型类型
+    # Auto-detect or use specified model type
     if model_type is None:
         model_type = detect_model_type(model_name)
     
     print(f"[model_factory] Loading model: {model_name} (type: {model_type})")
     
-    # 获取对应的模型类
+    # Get the corresponding model class
     model_class = _get_model_class(model_type)
     
-    # 创建模型
+    # Create model
     model = model_class.from_pretrained(
         model_name,
         override_args=override_args,
@@ -292,12 +290,12 @@ def create_model_skeleton(
     is_teacher: bool = False,
 ) -> nn.Module:
     """
-    只创建模型结构（随机初始化），不从磁盘加载预训练权重。
-    用于 broadcast 加载场景：rank 0 加载完整模型，其他 rank 只需要结构壳，
-    然后通过 broadcast 接收 state_dict 恢复权重。
-    
-    对于 HF 模型（LLaMA/OPT/Qwen/Mistral），从 config 直接构建空模型。
-    对于 GPT-2，创建空 GPT 结构（跳过 HF 权重转换）。
+    Create model skeleton (random init) without loading pretrained weights.
+    Used for broadcast-loading: rank 0 loads the full model, other ranks only
+    need the structure shell, then receive state_dict via broadcast.
+
+    For HF models (LLaMA/OPT/Qwen/Mistral), builds an empty model from config.
+    For GPT-2, creates an empty GPT structure (skips HF weight conversion).
     """
     if model_type is None:
         model_type = detect_model_type(model_name)
@@ -306,7 +304,7 @@ def create_model_skeleton(
     model_type_lower = model_type.lower()
     
     if model_type_lower == "gpt2":
-        # GPT-2: 创建空壳 GPT 模型（只需要 config，不从 HF 加载）
+        # GPT-2: create empty GPT model shell (config only, no HF loading)
         from model import GPT, GPTConfig
         import os, json
         
@@ -369,11 +367,11 @@ def create_model_skeleton(
             config.hidden_dropout = override_args["dropout"]
             config.attention_dropout = override_args["dropout"]
         config.output_hidden_states = bool(override_args.get("output_hidden_state", False))
-        # 不再通过 config.gradient_checkpointing 启用（新版 transformers 4.50+ 已重构）。
-        # skeleton 创建时不设置 gradient_checkpointing，等后续加载完权重后
-        # 通过 model.gradient_checkpointing_enable(use_reentrant=False) 启用。
+    # Do not enable gradient_checkpointing via config (refactored in transformers 4.50+).
+    # Skeleton creation skips gradient_checkpointing; enable it later after loading
+    # weights via model.gradient_checkpointing_enable(use_reentrant=False).
         config.use_cache = False
-        # attn_implementation 跟随 eager_attention 参数，保证所有 rank 的 attention 实现一致
+    # attn_implementation follows eager_attention flag to ensure consistent attention impl across ranks
         if override_args.get("eager_attention", False):
             config._attn_implementation = "eager"
         return LlamaSparse(config, sparselinear_config=sparselinear_config, is_teacher=is_teacher)
@@ -387,7 +385,7 @@ def create_model_skeleton(
             config.attention_dropout = override_args["dropout"]
         config.output_hidden_states = bool(override_args.get("output_hidden_state", False))
         config.use_cache = False
-        # attn_implementation 跟随 eager_attention 参数，保证所有 rank 的 attention 实现一致
+    # attn_implementation follows eager_attention flag to ensure consistent attention impl across ranks
         if override_args.get("eager_attention", False):
             config._attn_implementation = "eager"
         return OPTSparse(config, sparselinear_config=sparselinear_config, is_teacher=is_teacher)
@@ -400,7 +398,7 @@ def create_model_skeleton(
             config.attention_dropout = override_args["dropout"]
         config.output_hidden_states = bool(override_args.get("output_hidden_state", False))
         config.use_cache = False
-        # attn_implementation 跟随 eager_attention 参数，保证所有 rank 的 attention 实现一致
+    # attn_implementation follows eager_attention flag to ensure consistent attention impl across ranks
         if override_args.get("eager_attention", False):
             config._attn_implementation = "eager"
         return QwenSparse(config, sparselinear_config=sparselinear_config, is_teacher=is_teacher)
@@ -413,13 +411,13 @@ def create_model_skeleton(
             config.attention_dropout = override_args["dropout"]
         config.output_hidden_states = bool(override_args.get("output_hidden_state", False))
         config.use_cache = False
-        # attn_implementation 跟随 eager_attention 参数，保证所有 rank 的 attention 实现一致
+    # attn_implementation follows eager_attention flag to ensure consistent attention impl across ranks
         if override_args.get("eager_attention", False):
             config._attn_implementation = "eager"
         return MistralSparse(config, sparselinear_config=sparselinear_config, is_teacher=is_teacher)
     
     elif model_type_lower == "deepseek_moe":
-        # DeepSeek MoE 不支持空壳创建（model=None 会出错），回退到完整加载
+    # DeepSeek MoE does not support skeleton creation (model=None errors); fall back to full load
         print(f"[model_factory] WARNING: DeepSeek MoE does not support skeleton creation, falling back to full load")
         return get_sparse_model(
             model_name, model_type=model_type, override_args=override_args,
@@ -437,7 +435,7 @@ def create_model_skeleton(
                 config.attention_dropout = override_args["dropout"]
         config.output_hidden_states = bool(override_args.get("output_hidden_state", False))
         config.use_cache = False
-        # attn_implementation 跟随 eager_attention 参数，保证所有 rank 的 attention 实现一致
+    # attn_implementation follows eager_attention flag to ensure consistent attention impl across ranks
         if override_args.get("eager_attention", False):
             config._attn_implementation = "eager"
         return HunyuanSparse(config, sparselinear_config=sparselinear_config, is_teacher=is_teacher)
@@ -447,11 +445,10 @@ def create_model_skeleton(
 
 
 def get_model_info(model_name: str, model_type: Optional[str] = None) -> dict:
-    """
-    获取模型的基本信息（不加载权重）。
-    
+    """Get basic model information without loading weights.
+
     Returns:
-        包含模型信息的字典
+        Dictionary containing model metadata.
     """
     if model_type is None:
         model_type = detect_model_type(model_name)
@@ -482,7 +479,7 @@ def get_model_info(model_name: str, model_type: Optional[str] = None) -> dict:
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
     
-    # 构建返回信息，处理不同模型配置属性名差异
+    # Build return info, handling different config attribute names across models
     info = {
         "model_type": model_type,
         "model_name": model_name,
@@ -493,7 +490,7 @@ def get_model_info(model_name: str, model_type: Optional[str] = None) -> dict:
         "max_position_embeddings": getattr(config, 'max_position_embeddings', getattr(config, 'n_positions', None)),
     }
     
-    # 对于 MoE 模型，添加额外信息
+    # For MoE models, add extra information
     if model_type_lower == "deepseek_moe":
         info["num_experts"] = getattr(config, 'n_routed_experts', getattr(config, 'num_experts', None))
         info["num_experts_per_tok"] = getattr(config, 'num_experts_per_tok', getattr(config, 'top_k', None))
@@ -504,5 +501,5 @@ def get_model_info(model_name: str, model_type: Optional[str] = None) -> dict:
     return info
 
 
-# 支持的模型类型列表
+# Supported model types
 SUPPORTED_MODEL_TYPES = ["llama", "opt", "gpt2", "qwen", "mistral", "deepseek_moe", "hunyuan"]

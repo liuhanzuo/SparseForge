@@ -1,4 +1,40 @@
 #!/usr/bin/env bash
+###############################################################################
+# cluster_launcher.sh — Multi-Node Cluster Orchestration Library
+###############################################################################
+# This file is NOT meant to be executed directly. It is sourced by training
+# scripts (train_llama.sh, train_universal.sh, eval_wiki_ppl.sh) to provide
+# multi-node launch capabilities.
+#
+# ─── What It Does ───────────────────────────────────────────────────────────
+#
+#   - Manages a node pool (list of cluster node IPs)
+#   - Selects a subset of nodes by index for a given run
+#   - Launches torchrun on each selected node via SSH (background)
+#   - Runs rank0 in the foreground on the controller node
+#   - Forwards NCCL/network environment variables to all nodes
+#
+# ─── Node Pool Configuration ───────────────────────────────────────────────
+#
+#   Option A: Edit `cluster_default_nodes()` below to list your node IPs.
+#   Option B: Set the CLUSTER_NODE_IPS environment variable:
+#       export CLUSTER_NODE_IPS="10.0.0.1 10.0.0.2 10.0.0.3 10.0.0.4"
+#
+# ─── Prerequisites ──────────────────────────────────────────────────────────
+#
+#   1. Passwordless SSH from the controller to all worker nodes.
+#   2. Shared filesystem (e.g., NFS/Lustre/CephFS) mounted at the same path
+#      on all nodes so that code, data, and checkpoints are accessible.
+#   3. Identical software environment on all nodes (conda env, CUDA, etc.).
+#      Use CLUSTER_ENV_SETUP to activate the environment on remote nodes:
+#        export CLUSTER_ENV_SETUP='source ~/.bashrc && conda activate myenv &&'
+#
+# ─── Usage (from a training script) ────────────────────────────────────────
+#
+#   source scripts/cluster_launcher.sh
+#   cluster_launch_selected_nodes "$SCRIPT_PATH" "$nnodes" "${idxs[@]}" "$@"
+#
+###############################################################################
 set -euo pipefail
 
 # Cluster launcher helper.
@@ -15,6 +51,7 @@ set -euo pipefail
 # - Requires passwordless SSH to all selected nodes.
 
 cluster_default_nodes() {
+  # >>> Replace with your cluster node IPs (space-separated) <<<
   echo "<NODE_IP_1> <NODE_IP_2> <NODE_IP_3> <NODE_IP_4>"
 }
 

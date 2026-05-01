@@ -14,10 +14,14 @@ Examples:
   - DeepSeek-MoE: --student_model deepseek-ai/deepseek-moe-16b-base
 """
 import os
+import sys
+
+# Ensure parent directory is on sys.path so that `sparseforge` package is importable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 import json
 import math
-import sys
 import atexit
 import traceback
 from contextlib import nullcontext

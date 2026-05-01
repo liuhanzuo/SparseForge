@@ -44,6 +44,7 @@ runs/
 wandb/
 logs/
 checkpoints/
+archive/
 
 # ---------- Core dumps / tracebacks ----------
 core.*
