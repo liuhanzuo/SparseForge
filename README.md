@@ -152,7 +152,7 @@ nodes from the pool defined in `cluster_launcher.sh` and auto-launches via SSH.
 **Legacy mode**: `bash train_llama.sh <MASTER_IP> <NODE_RANK> <NNODES>` — run manually on
 each node.
 
-### LLaMA-2-7B (block-sparse-16, Hutchinson Hessian)
+### LLaMA-2-7B (2:4 N:M sparsity, Hutchinson Hessian)
 
 ```bash
 bash train_llama.sh
@@ -175,7 +175,7 @@ Open `train_universal.sh` and uncomment the desired model block, e.g.
 STUDENT_MODEL="models/Qwen--Qwen3-1.7b"
 TEACHER_MODEL="models/Qwen--Qwen3-1.7b"
 MODEL_TYPE="qwen"
-MASK_TYPE="block_sparse16"    # or "unstructured" / "structured" (2:4)
+MASK_TYPE="nm_2_4"            # or "block_sparse16" / "unstructured"
 ```
 
 Then:

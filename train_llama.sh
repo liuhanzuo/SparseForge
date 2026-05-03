@@ -224,7 +224,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
   args+=(
     --mode sparse_forward
     --mask_type unstructured
-    --hard_mask_type block16
+    --hard_mask_type nm_2_4
     --mask_metric hessian_ratio
     --sparsity_ratio 0.5
     --change_mask True
@@ -256,7 +256,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
     --sparsity_warmup_steps 500
     --tau_sample_size 262144
     --mask_penalty_lr 0.1
-    --mask_penalty_mode block16
+    --mask_penalty_mode nm_2_4
     --sparsity_alpha 0.2
     --lambda_mid_max 0.1
   )
@@ -290,7 +290,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
     --eval_interval 200
     --srste_decay 0
     --wandb_logging True
-    --wandb_run_name "llama-2-7b-AST-block16-hutchinson"
+    --wandb_run_name "llama-2-7b-AST-nm24-hutchinson"
     --wandb_project "AST-Pruning"
     --dataset c4_llama
     --out_dir out_llama
