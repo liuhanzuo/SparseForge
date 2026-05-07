@@ -23,14 +23,27 @@ from typing import Any, Optional
 
 import torch
 
-# Re-export the core model class for convenient access.
-from model_llama import LlamaSparse
+# NOTE: ``LlamaSparse`` lives in ``legacy/model_llama.py`` and is only importable
+# when the training script is launched from that directory (the ``legacy/`` path
+# is then on ``sys.path``).  We therefore re-export it lazily via ``__getattr__``
+# so that ``import sparseforge.model_builders.llama`` from an arbitrary CWD
+# does not hard-fail when ``model_llama`` is not yet discoverable.  The helper
+# ``get_fsdp_wrap_policy`` below is self-contained (pure torch) and is always
+# available.
 
 __all__ = [
     "LlamaSparse",
     "get_fsdp_wrap_policy",
     "SUPPORTED_FSDP_MODES",
 ]
+
+
+def __getattr__(name: str) -> Any:  # PEP 562 lazy attribute hook
+    if name == "LlamaSparse":
+        from model_llama import LlamaSparse  # noqa: WPS433 (runtime import by design)
+
+        return LlamaSparse
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Valid FSDP sharding modes accepted by the training scripts.
 SUPPORTED_FSDP_MODES = (

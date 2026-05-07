@@ -9,12 +9,17 @@ side-effects at import time):
     - data_pipeline     : AsyncDataPrefetcher / get_batch / _load_bin
     - optim_utils       : optimizer construction, LR schedule, FSDP optim-sd alignment
     - eval_utils        : estimate_loss
-    - channel_pruning_hooks : structured channel-pruning helpers (universal only)
-    - state             : TrainState dataclass that threads state across stages
-    - model_builders.llama     : build_student / build_teacher / wrap_fsdp for LLaMA
-    - model_builders.universal : same, for the universal (multi-arch) entry point
-    - checkpoint        : resume / save logic
-    - training_loop     : the main `while True` training loop
+    - state             : TrainState dataclass (reference; main_*.py still uses
+                          module-level state, see state.py docstring)
+    - model_builders.llama     : FSDP wrap-policy helper + lazy LlamaSparse re-export
+    - model_builders.universal : FSDP wrap-policy helper + lazy model_factory re-exports
+    - checkpoint        : ckpt discovery / metadata helpers (reference; actual
+                          save/load lives in main_*.py, see checkpoint.py docstring)
+    - training_loop     : TrainingStage enum + detect_stage() (reference; the
+                          actual loop remains in main_*.py)
+
+Note: structured channel-pruning code lives in the top-level ``channel_pruning/``
+package of this repository, not under ``sparseforge``.
 """
 
 __version__ = "0.1.0"

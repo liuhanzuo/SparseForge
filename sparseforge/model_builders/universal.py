@@ -27,8 +27,14 @@ from typing import Any, Optional
 
 import torch
 
-# Re-export the model factory for convenient access.
-from model_factory import get_sparse_model, detect_model_type, SUPPORTED_MODEL_TYPES
+# NOTE: ``get_sparse_model`` / ``detect_model_type`` / ``SUPPORTED_MODEL_TYPES``
+# live in ``legacy/model_factory.py`` and are only importable when the training
+# script is launched from that directory (the ``legacy/`` path is then on
+# ``sys.path``).  We therefore re-export them lazily via ``__getattr__`` so
+# that ``import sparseforge.model_builders.universal`` from an arbitrary CWD
+# does not hard-fail when ``model_factory`` is not yet discoverable.  The
+# helper ``get_fsdp_wrap_policy`` below is self-contained (pure torch) and is
+# always available.
 
 __all__ = [
     "get_sparse_model",
@@ -36,6 +42,21 @@ __all__ = [
     "SUPPORTED_MODEL_TYPES",
     "get_fsdp_wrap_policy",
 ]
+
+
+_LAZY_FACTORY_EXPORTS = {
+    "get_sparse_model",
+    "detect_model_type",
+    "SUPPORTED_MODEL_TYPES",
+}
+
+
+def __getattr__(name: str) -> Any:  # PEP 562 lazy attribute hook
+    if name in _LAZY_FACTORY_EXPORTS:
+        import model_factory  # noqa: WPS433 (runtime import by design)
+
+        return getattr(model_factory, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def get_fsdp_wrap_policy(
