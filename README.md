@@ -267,11 +267,14 @@ Default hyper-parameters in the provided `.sh` scripts match the paper setup.
 If you find SparseForge useful, please cite:
 
 ```bibtex
-@article{liu2026sparseforge,
-  title   = {SparseForge: Efficient LLM Semi-Structured Pruning via Hessian-Guided Soft-Mask Tempering},
-  author  = {Liu, Hanzuo and Lin, Chaofan and Sun, Weixuan and Wang, Yulong and Rayying and Key and Gao, Mingyu},
-  journal = {arXiv preprint},
-  year    = {2026}
+@misc{hanzuo2026sparseforgeefficientsemistructuredllm,
+      title={SparseForge: Efficient Semi-Structured LLM Sparsification via Annealing of Hessian-Guided Soft-Mask}, 
+      author={Liu Hanzuo and Chaofan Lin and Weixuan Sun and Yulong Wang and Key and Rayying and Mingyu Gao},
+      year={2026},
+      eprint={2605.06402},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2605.06402}, 
 }
 ```
 
