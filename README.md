@@ -1,7 +1,7 @@
 # SparseForge
 
 > **Official code for _"SparseForge: Efficient LLM Semi-Structured Pruning via Hessian-Guided Soft-Mask Tempering"_**
-> Paper: [arXiv (coming soon)]() &nbsp;|&nbsp; Venue: NeurIPS 2026 (under review)
+> Paper: [arXiv](https://arxiv.org/abs/2605.06402) &nbsp;|&nbsp; Venue: NeurIPS 2026 (under review)
 
 **SparseForge** is a post-training framework for semi-structured LLM sparsification that
 optimizes the sparsity mask directly — rather than scaling up retraining tokens — to
